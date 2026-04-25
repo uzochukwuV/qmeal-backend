@@ -1,10 +1,7 @@
 #!/bin/bash
-set -e
-#!/bin/bash
-set -e
-
-echo "Installing dependencies..."
-pip install -r requirements.txt
-
-echo "Starting application with Uvicorn worker..."
-gunicorn --bind 0.0.0.0:8000 --workers 2 --worker-class uvicorn.workers.UvicornWorker --timeout 120 server:app
+# Add /api/* to Caddy backend routes so API endpoints return JSON instead of HTML
+if ! grep -q '/api/\*' /etc/caddy/Caddyfile; then
+    sed -i 's|@backend_routes path /_event|@backend_routes path /api /api/* /_event|' /etc/caddy/Caddyfile
+    caddy reload --config /etc/caddy/Caddyfile 2>/dev/null || true
+    echo "Caddy config updated: /api/* routes now forwarded to backend"
+fi
