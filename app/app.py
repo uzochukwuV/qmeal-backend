@@ -1077,25 +1077,14 @@ def settings_page() -> rx.Component:
     )
 
 
+from fastapi import FastAPI
 from app.api.routes import api_router
-from starlette.middleware.cors import CORSMiddleware
 
-
-def setup_api(app):
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-    app.include_router(api_router)
-    return app
-
-
+api_app = FastAPI()
+api_app.include_router(api_router)
 app = rx.App(
     theme=rx.theme(appearance="light"),
-    api_transformer=setup_api,
+    api_transformer=api_app,
     head_components=[
         rx.el.link(rel="preconnect", href="https://fonts.googleapis.com"),
         rx.el.link(rel="preconnect", href="https://fonts.gstatic.com", cross_origin=""),

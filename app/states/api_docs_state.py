@@ -593,7 +593,8 @@ class ApiDocsState(rx.State):
         try:
             host = self.router.page.host
             protocol = "https" if "localhost" not in host else "http"
-            url = f"{protocol}://{host}{path}"
+            base_url = f"{protocol}://{host}" if "://" not in host else host
+            url = f"{base_url}{path}"
             headers = {"Content-Type": "application/json"}
             if self.auth_token:
                 headers["Authorization"] = f"Bearer {self.auth_token}"
