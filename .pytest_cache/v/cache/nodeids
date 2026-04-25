@@ -1,1 +1,8 @@
-[]
+[
+  "tests/test_api_integration.py::test_get_cuisines_publicly",
+  "tests/test_api_integration.py::test_get_restaurant_detail_publicly",
+  "tests/test_api_integration.py::test_get_restaurant_menu_publicly",
+  "tests/test_api_integration.py::test_get_restaurant_reviews_publicly",
+  "tests/test_api_integration.py::test_get_restaurants_publicly_with_filters",
+  "tests/test_api_integration.py::test_health_check_endpoint"
+]

@@ -9,3 +9,6 @@ pyjwt
 starlette
 pymongo[srv]
 motor
+pytest
+mongomock-motor
+pytest-asyncio
