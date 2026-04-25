@@ -340,6 +340,11 @@ class PayoutRequest(BaseModel):
     method: str = "bank_transfer"
 
 
+class CreatePromotionRequest(BaseModel):
+    code: str
+    discount_percentage: float
+
+
 def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
@@ -867,6 +872,14 @@ async def get_payment_config():
 async def create_review(
     review_data: CreateReviewRequest, current_user: User = Depends(require_auth)
 ):
+    """Create a new review and update restaurant rating"""
+    restaurant = await db.restaurants.find_one(
+        {"restaurant_id": review_data.restaurant_id},
+        {"_id": 0}
+    )
+    if not restaurant:
+        raise HTTPException(status_code=404, detail="Restaurant not found")
+
     review = Review(
         restaurant_id=review_data.restaurant_id,
         user_id=current_user.user_id,
@@ -874,7 +887,22 @@ async def create_review(
         rating=review_data.rating,
         comment=review_data.comment,
     )
+
     await db.reviews.insert_one(review.dict())
+
+    # Update restaurant rating
+    all_reviews = await db.reviews.find(
+        {"restaurant_id": review_data.restaurant_id},
+        {"_id": 0}
+    ).to_list(1000)
+
+    if all_reviews:
+        avg_rating = sum(r["rating"] for r in all_reviews) / len(all_reviews)
+        await db.restaurants.update_one(
+            {"restaurant_id": review_data.restaurant_id},
+            {"$set": {"rating": round(avg_rating, 1), "review_count": len(all_reviews)}}
+        )
+
     return review
 
 
@@ -915,7 +943,68 @@ async def require_owner(request: Request) -> User:
 
 @api_router.get("/owner/dashboard")
 async def owner_dashboard(current_user: User = Depends(require_owner)):
-    return {"restaurant": {}, "stats": {}}
+    """Get dashboard stats for restaurant owner"""
+    restaurant_id = current_user.restaurant_id
+
+    # Get restaurant info
+    restaurant = await db.restaurants.find_one(
+        {"restaurant_id": restaurant_id}, {"_id": 0}
+    )
+
+    # Today's orders
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    today_orders = await db.orders.count_documents({
+        "restaurant_id": restaurant_id,
+        "created_at": {"$gte": today_start}
+    })
+
+    # Total revenue today
+    pipeline = [
+        {"$match": {
+            "restaurant_id": restaurant_id,
+            "created_at": {"$gte": today_start}
+        }},
+        {"$group": {"_id": None, "total": {"$sum": "$total"}}}
+    ]
+    revenue_result = await db.orders.aggregate(pipeline).to_list(1)
+    today_revenue = revenue_result[0]["total"] if revenue_result else 0
+
+    # Total revenue all time
+    pipeline_all = [
+        {"$match": {"restaurant_id": restaurant_id}},
+        {"$group": {"_id": None, "total": {"$sum": "$total"}}}
+    ]
+    all_revenue_result = await db.orders.aggregate(pipeline_all).to_list(1)
+    total_revenue = all_revenue_result[0]["total"] if all_revenue_result else 0
+
+    # Pending orders count
+    pending_orders = await db.orders.count_documents({
+        "restaurant_id": restaurant_id,
+        "status": {"$in": ["pending", "confirmed"]}
+    })
+
+    # Total orders count
+    total_orders = await db.orders.count_documents({"restaurant_id": restaurant_id})
+
+    # Menu items count
+    menu_count = await db.menu_items.count_documents({"restaurant_id": restaurant_id})
+
+    # Reviews count
+    review_count = await db.reviews.count_documents({"restaurant_id": restaurant_id})
+
+    return {
+        "restaurant": restaurant,
+        "stats": {
+            "today_orders": today_orders,
+            "today_revenue": round(today_revenue, 2),
+            "total_revenue": round(total_revenue, 2),
+            "pending_orders": pending_orders,
+            "total_orders": total_orders,
+            "menu_items": menu_count,
+            "review_count": review_count,
+            "rating": restaurant.get("rating", 0) if restaurant else 0,
+        }
+    }
 
 
 @api_router.get("/owner/orders")
@@ -951,7 +1040,19 @@ async def owner_get_menu(current_user: User = Depends(require_owner)):
 async def owner_add_menu_item(
     request_data: AddMenuItemRequest, current_user: User = Depends(require_owner)
 ):
-    return {}
+    """Add a new menu item"""
+    item = MenuItem(
+        restaurant_id=current_user.restaurant_id,
+        name=request_data.name,
+        description=request_data.description,
+        price=request_data.price,
+        category=request_data.category,
+        image_url=request_data.image_url,
+        is_available=request_data.is_available,
+        is_popular=request_data.is_popular,
+    )
+    await db.menu_items.insert_one(item.dict())
+    return item.dict()
 
 
 @api_router.patch("/owner/menu/{item_id}")
@@ -960,13 +1061,37 @@ async def owner_update_menu_item(
     request_data: UpdateMenuItemRequest,
     current_user: User = Depends(require_owner),
 ):
-    return {}
+    """Update an existing menu item"""
+    existing = await db.menu_items.find_one({
+        "item_id": item_id,
+        "restaurant_id": current_user.restaurant_id
+    })
+    if not existing:
+        raise HTTPException(status_code=404, detail="Menu item not found")
+
+    update_fields = {k: v for k, v in request_data.dict().items() if v is not None}
+    if not update_fields:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    await db.menu_items.update_one(
+        {"item_id": item_id},
+        {"$set": update_fields}
+    )
+    updated = await db.menu_items.find_one({"item_id": item_id}, {"_id": 0})
+    return updated
 
 
 @api_router.delete("/owner/menu/{item_id}")
 async def owner_delete_menu_item(
     item_id: str, current_user: User = Depends(require_owner)
 ):
+    """Delete a menu item"""
+    result = await db.menu_items.delete_one({
+        "item_id": item_id,
+        "restaurant_id": current_user.restaurant_id
+    })
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Menu item not found")
     return {"message": "Menu item deleted"}
 
 
@@ -979,28 +1104,86 @@ async def owner_get_promotions(current_user: User = Depends(require_owner)):
 
 @api_router.post("/owner/promotions")
 async def owner_create_promotion(
-    request_data: dict, current_user: User = Depends(require_owner)
+    request_data: CreatePromotionRequest, current_user: User = Depends(require_owner)
 ):
-    return {}
+    """Create a new promotion"""
+    if request_data.discount_percentage <= 0 or request_data.discount_percentage > 100:
+        raise HTTPException(status_code=400, detail="Invalid discount percentage")
+
+    promotion = {
+        "promo_id": f"promo_{uuid.uuid4().hex[:12]}",
+        "restaurant_id": current_user.restaurant_id,
+        "code": request_data.code.upper(),
+        "discount_percentage": request_data.discount_percentage,
+        "is_active": True,
+        "created_at": datetime.now(timezone.utc)
+    }
+    await db.promotions.insert_one(promotion)
+    return {"message": "Promotion created successfully", "promotion": promotion}
 
 
 @api_router.delete("/owner/promotions/{promo_id}")
 async def owner_delete_promotion(
     promo_id: str, current_user: User = Depends(require_owner)
 ):
-    return {"message": "Promotion deleted"}
+    """Delete a promotion"""
+    result = await db.promotions.delete_one({
+        "promo_id": promo_id,
+        "restaurant_id": current_user.restaurant_id
+    })
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Promotion not found")
+    return {"message": "Promotion deleted successfully"}
 
 
 @api_router.get("/owner/payouts")
 async def owner_get_payouts(current_user: User = Depends(require_owner)):
-    return {"available_balance": 0, "history": []}
+    """Get payout history and available balance"""
+    # Calculate available balance (total revenue - already requested payouts)
+    pipeline = [
+        {"$match": {"restaurant_id": current_user.restaurant_id, "status": "delivered"}},
+        {"$group": {"_id": None, "total": {"$sum": "$total"}}}
+    ]
+    revenue_result = await db.orders.aggregate(pipeline).to_list(1)
+    total_revenue = revenue_result[0]["total"] if revenue_result else 0
+
+    payout_pipeline = [
+        {"$match": {"user_id": current_user.user_id}},
+        {"$group": {"_id": None, "total": {"$sum": "$amount"}}}
+    ]
+    payout_result = await db.payouts.aggregate(payout_pipeline).to_list(1)
+    total_payouts = payout_result[0]["total"] if payout_result else 0
+
+    available_balance = max(0, total_revenue - total_payouts)
+
+    payout_history = await db.payouts.find(
+        {"user_id": current_user.user_id}, {"_id": 0}
+    ).sort("created_at", -1).to_list(20)
+
+    return {
+        "available_balance": available_balance,
+        "history": payout_history
+    }
 
 
 @api_router.post("/owner/payouts/request")
 async def owner_request_payout(
     request_data: PayoutRequest, current_user: User = Depends(require_owner)
 ):
-    return {"message": "Payout requested"}
+    """Request a payout"""
+    if request_data.amount <= 0:
+        raise HTTPException(status_code=400, detail="Invalid amount")
+
+    payout = {
+        "payout_id": f"pay_{uuid.uuid4().hex[:12]}",
+        "user_id": current_user.user_id,
+        "amount": request_data.amount,
+        "status": "pending",
+        "method": request_data.method,
+        "created_at": datetime.now(timezone.utc)
+    }
+    await db.payouts.insert_one(payout)
+    return {"message": "Payout requested successfully"}
 
 
 @api_router.get("/owner/restaurant")
@@ -1014,7 +1197,19 @@ async def owner_get_restaurant(current_user: User = Depends(require_owner)):
 async def owner_update_restaurant(
     request_data: UpdateRestaurantRequest, current_user: User = Depends(require_owner)
 ):
-    return {}
+    """Update restaurant details"""
+    update_fields = {k: v for k, v in request_data.dict().items() if v is not None}
+    if not update_fields:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    await db.restaurants.update_one(
+        {"restaurant_id": current_user.restaurant_id},
+        {"$set": update_fields}
+    )
+    updated = await db.restaurants.find_one(
+        {"restaurant_id": current_user.restaurant_id}, {"_id": 0}
+    )
+    return updated
 
 
 @api_router.post("/seed")
