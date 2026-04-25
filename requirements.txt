@@ -1,0 +1,11 @@
+httpx
+stripe
+certifi
+bcrypt
+python-dotenv
+reflex==0.8.26
+fastapi
+pyjwt
+starlette
+pymongo[srv]
+motor
